@@ -1,30 +1,78 @@
-import 'package:flutter_riverpod/flutter_riverpod.dart';
-
-final Provider<TodosDatabase> todosDatabaseProvider = Provider((ref) => throw UnimplementedError());
+import 'package:drift/drift.dart';
+import 'package:todos_electrified/database/drift/database.dart';
 
 class TodosDatabase {
-  final TodosRepository todosRepo;
+  final AppDatabase db;
 
-  TodosDatabase(this.todosRepo);
+  TodosDatabase(this.db);
+
+  Future<void> close() async {
+    await db.close();
+  }
 
   Future<List<Todo>> fetchTodos() async {
-    return todosRepo.fetchTodos();
+    return (db.todo.select()
+          ..orderBy(
+            [(tbl) => OrderingTerm(expression: tbl.text$.lower())],
+          ))
+        .map(
+          (todo) => Todo(
+            completed: todo.completed,
+            id: todo.id,
+            listId: todo.listid,
+            editedAt: todo.editedAt,
+            text: todo.text$!,
+          ),
+        )
+        .get();
   }
 
   Stream<List<Todo>> watchTodos() {
-    return todosRepo.watchTodos();
+    return (db.todo.select()
+          ..orderBy(
+            [(tbl) => OrderingTerm(expression: tbl.text$.lower())],
+          ))
+        .map(
+          (todo) => Todo(
+            completed: todo.completed,
+            id: todo.id,
+            listId: todo.listid,
+            editedAt: todo.editedAt,
+            text: todo.text$!,
+          ),
+        )
+        .watch();
   }
 
   Future<void> updateTodo(Todo todo) async {
-    return todosRepo.updateTodo(todo);
+    await (db.todo.update()
+          ..where(
+            (tbl) => tbl.id.equals(todo.id),
+          ))
+        .write(
+      TodoCompanion(
+        completed: Value(todo.completed),
+        listid: Value(todo.listId),
+        text$: Value(todo.text),
+        editedAt: Value(DateTime.now()),
+      ),
+    );
   }
 
   Future<void> insertTodo(Todo todo) async {
-    return todosRepo.insertTodo(todo);
+    await db.todo.insertOne(
+      TodoCompanion.insert(
+        id: todo.id,
+        completed: todo.completed,
+        listid: Value(todo.listId),
+        text$: Value(todo.text),
+        editedAt: todo.editedAt,
+      ),
+    );
   }
 
   Future<void> removeTodo(String id) async {
-    return todosRepo.removeTodo(id);
+    await db.todo.deleteWhere((tbl) => tbl.id.equals(id));
   }
 }
 
@@ -57,13 +105,4 @@ class Todo {
       completed: completed ?? this.completed,
     );
   }
-}
-
-abstract class TodosRepository {
-  Future<List<Todo>> fetchTodos();
-  Stream<List<Todo>> watchTodos();
-  Future<void> updateTodo(Todo todo);
-  Future<void> removeTodo(String id);
-  Future<void> insertTodo(Todo todo);
-  Future<void> close();
 }

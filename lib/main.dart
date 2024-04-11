@@ -1,180 +1,62 @@
 import 'dart:async';
 
-import 'package:electricsql/util.dart' show SatelliteErrorCode, SatelliteException, genUUID;
-import 'package:electricsql_flutter/drivers/drift.dart';
-import 'package:electricsql_flutter/electricsql_flutter.dart';
-import 'package:flutter/foundation.dart';
+import 'package:electricsql/util.dart' show genUUID;
 import 'package:flutter/material.dart';
-import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 import 'package:todos_electrified/database/database.dart';
-import 'package:todos_electrified/database/drift/connection/connection.dart' as impl;
-import 'package:todos_electrified/database/drift/database.dart';
-import 'package:todos_electrified/database/drift/drift_repository.dart';
-import 'package:todos_electrified/electric.dart';
-import 'package:todos_electrified/init.dart';
-import 'package:todos_electrified/todos.dart';
-import 'package:todos_electrified/util/confirmation_dialog.dart';
+import 'package:todos_electrified/services/electric_service.dart';
 
 const kListId = "LIST-ID-SAMPLE";
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
-
-  runApp(_Entrypoint());
+  await ElectricService().init();
+  runApp(const App());
 }
 
-StateProvider<bool> dbDeletedProvider = StateProvider((ref) => false);
+class App extends StatefulWidget {
+  const App({super.key});
 
-typedef InitData = ({
-  TodosDatabase todosDb,
-  ElectricClient electricClient,
-  ConnectivityStateController connectivityStateController,
-});
-
-class _Entrypoint extends StatefulWidget {
   @override
-  State<_Entrypoint> createState() => _EntrypointState();
+  State<App> createState() => _AppState();
 }
 
-class _EntrypointState extends State<_Entrypoint> {
-  InitData? initData;
-
+class _AppState extends State<App> {
   @override
   void initState() {
     super.initState();
-    useInitializeApp(context);
-  }
-
-  void useInitializeApp(BuildContext context) async {
-    final driftRepo = await initDriftTodosDatabase();
-    try {
-      const dbName = "todos_db";
-
-      final DriftElectricClient<AppDatabase> electricClient;
-      electricClient = await startElectricDrift(dbName, driftRepo.db);
-      electricClient.syncTables(["todo", "todolist"]);
-
-      final todosDb = TodosDatabase(driftRepo);
-      final connectivityStateController = ConnectivityStateController(electricClient)..init();
-
-      final init = (
-        todosDb: todosDb,
-        electricClient: electricClient,
-        connectivityStateController: connectivityStateController,
-      );
-      setState(() {
-        initData = init;
-      });
-    } on SatelliteException catch (e) {
-      if (e.code == SatelliteErrorCode.unknownSchemaVersion) {
-        // Ask to delete the database
-        final shouldDeleteLocal = await launchConfirmationDialog(
-          title: "Local schema doesn't match server's",
-          content: const Text("Delete local state and retry?"),
-          context: context,
-          barrierDismissible: false,
-        );
-
-        if (shouldDeleteLocal == true) {
-          await driftRepo.close();
-
-          if (!kIsWeb) {
-            await impl.deleteTodosDbFile();
-
-            //retryVN.value++;
-            return;
-          } else {
-            // On web, we cannot properly retry automatically, so just ask the user to refresh
-            // the page
-
-            unawaited(impl.deleteTodosDbFile());
-            await Future<void>.delayed(const Duration(milliseconds: 200));
-
-            if (!context.mounted) return;
-
-            await showDialog<void>(
-                context: context,
-                barrierDismissible: false,
-                builder: (context) {
-                  return const AlertDialog(
-                    title: Text("Local database deleted"),
-                    content: Text("Please refresh the page"),
-                  );
-                });
-
-            // Wait indefinitely until user refreshes
-            await Future<void>.delayed(const Duration(days: 9999));
-          }
-        }
-      }
-      rethrow;
-    }
   }
 
   @override
   void dispose() {
-    // Cleanup resources on app unmount
-    if (initData != null) {
-      initData!.electricClient.close();
-      initData!.todosDb.todosRepo.close();
-      print("Everything closed");
-    }
+    ElectricService().dispose();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (initData == null) {
-      // This will initialize the app and will update the initData ValueNotifier
-      return const InitAppLoader();
-    }
-
-    // Database and Electric are ready
-    return ProviderScope(
-      overrides: [
-        todosDatabaseProvider.overrideWithValue(initData!.todosDb),
-        electricClientProvider.overrideWithValue(initData!.electricClient),
-        connectivityStateControllerProvider.overrideWith(
-          (ref) => initData!.connectivityStateController,
-        ),
-      ],
-      child: const MyApp(),
-    );
+    return const Home();
   }
 }
 
-class MyApp extends StatelessWidget {
-  const MyApp({super.key});
+class Home extends StatelessWidget {
+  const Home({super.key});
 
   // This widget is the root of your application.
   @override
   Widget build(BuildContext context) {
-    return MaterialApp(
+    return const MaterialApp(
       title: 'Todos Electrified',
-      home: Consumer(
-        builder: (context, ref, _) {
-          final dbDeleted = ref.watch(dbDeletedProvider);
-
-          if (dbDeleted) {
-            return const _DeleteDbScreen();
-          }
-
-          return const MyHomePage();
-        },
-      ),
+      home: MyHomePage(),
     );
   }
 }
 
-class MyHomePage extends ConsumerWidget {
+class MyHomePage extends StatelessWidget {
   const MyHomePage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
-    final todosAV = ref.watch(todosProvider);
-    ref.watch(electricClientProvider);
-
+  Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
         leading: const Center(
@@ -190,39 +72,21 @@ class MyHomePage extends ConsumerWidget {
       ),
       body: Column(
         children: [
-          const SizedBox(height: 10),
-          const ConnectivityButton(),
-          const SizedBox(height: 10),
           Expanded(
-            child: todosAV.when(
-              data: (todos) {
-                return _TodosLoaded(todos: todos);
+            child: StreamBuilder<List<Todo>>(
+              stream: ElectricService().todosDb!.watchTodos(),
+              builder: (context, snapshot) {
+                //if (snapshot.connectionState == ConnectionState.waiting) {
+                //  return const Center(child: CircularProgressIndicator());
+                //}
+                if (snapshot.hasError) {
+                  return Center(child: Text(snapshot.error.toString()));
+                }
+                if (snapshot.hasData && snapshot.data!.isNotEmpty) {
+                  return _TodosLoaded(todos: snapshot.data ?? []);
+                }
+                return const Center(child: Text("empty"));
               },
-              error: (e, st) {
-                return Center(child: Text(e.toString()));
-              },
-              loading: () => const Center(child: CircularProgressIndicator()),
-            ),
-          ),
-          const Align(
-            alignment: Alignment.center,
-            child: Padding(
-              padding: EdgeInsets.all(8.0),
-              child: Column(
-                children: [
-                  Text(
-                    "Unofficial Dart client running on top of\nthe sync service powered by",
-                    textAlign: TextAlign.center,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const Align(
-            alignment: Alignment.centerLeft,
-            child: Padding(
-              padding: EdgeInsets.all(8.0),
-              child: _DeleteDbButton(),
             ),
           ),
         ],
@@ -231,28 +95,7 @@ class MyHomePage extends ConsumerWidget {
   }
 }
 
-class _DeleteDbButton extends ConsumerWidget {
-  const _DeleteDbButton();
-
-  @override
-  Widget build(BuildContext context, ref) {
-    return TextButton.icon(
-      style: TextButton.styleFrom(foregroundColor: Theme.of(context).colorScheme.error),
-      onPressed: () async {
-        ref.read(dbDeletedProvider.notifier).update((state) => true);
-
-        final todosDb = ref.read(todosDatabaseProvider);
-        await todosDb.todosRepo.close();
-
-        await impl.deleteTodosDbFile();
-      },
-      icon: const Icon(Icons.delete),
-      label: const Text("Delete local database"),
-    );
-  }
-}
-
-class ConnectivityButton extends ConsumerWidget {
+/* class ConnectivityButton extends ConsumerWidget {
   const ConnectivityButton({super.key});
 
   @override
@@ -276,7 +119,7 @@ class ConnectivityButton extends ConsumerWidget {
     return ElevatedButton.icon(
       onPressed: () async {
         final connectivityStateController = ref.read(connectivityStateControllerProvider);
-        final electricClient = ref.read(electricClientProvider);
+        final electricClient = ElectricService().initData!.electricClient; //ref.read(electricClientProvider);
         final state = connectivityStateController.connectivityState;
         switch (state.status) {
           case ConnectivityStatus.connected:
@@ -290,16 +133,16 @@ class ConnectivityButton extends ConsumerWidget {
       label: Text(label),
     );
   }
-}
+} */
 
-class _TodosLoaded extends ConsumerWidget {
+class _TodosLoaded extends StatelessWidget {
   _TodosLoaded({required this.todos});
 
   final List<Todo> todos;
   final TextEditingController textController = TextEditingController();
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     return Align(
       alignment: Alignment.topCenter,
       child: Card(
@@ -323,16 +166,15 @@ class _TodosLoaded extends ConsumerWidget {
                       return;
                     }
                     print("done");
-                    final db = ref.read(todosDatabaseProvider);
-                    await db.insertTodo(
-                      Todo(
-                        id: genUUID(),
-                        listId: kListId,
-                        text: textController.text,
-                        editedAt: DateTime.now(),
-                        completed: false,
-                      ),
-                    );
+                    await ElectricService().todosDb?.insertTodo(
+                          Todo(
+                            id: genUUID(),
+                            listId: kListId,
+                            text: textController.text,
+                            editedAt: DateTime.now(),
+                            completed: false,
+                          ),
+                        );
 
                     textController.clear();
                   },
@@ -366,17 +208,16 @@ class _TodosLoaded extends ConsumerWidget {
   }
 }
 
-class TodoTile extends ConsumerWidget {
+class TodoTile extends StatelessWidget {
   final Todo todo;
   const TodoTile({super.key, required this.todo});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  Widget build(BuildContext context) {
     return ListTile(
       leading: IconButton(
         onPressed: () async {
-          final db = ref.read(todosDatabaseProvider);
-          await db.updateTodo(todo.copyWith(completed: !todo.completed));
+          await ElectricService().todosDb?.updateTodo(todo.copyWith(completed: !todo.completed));
         },
         icon: todo.completed
             ? Icon(
@@ -398,23 +239,9 @@ class TodoTile extends ConsumerWidget {
       ),
       trailing: IconButton(
         onPressed: () async {
-          final db = ref.read(todosDatabaseProvider);
-          await db.removeTodo(todo.id);
+          await ElectricService().todosDb?.removeTodo(todo.id);
         },
         icon: const Icon(Icons.delete),
-      ),
-    );
-  }
-}
-
-class _DeleteDbScreen extends StatelessWidget {
-  const _DeleteDbScreen();
-
-  @override
-  Widget build(BuildContext context) {
-    return const Scaffold(
-      body: Center(
-        child: Text('Local database has been deleted, please restart the app'),
       ),
     );
   }
